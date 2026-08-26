@@ -131,4 +131,44 @@ public static partial class McpMod
             }
         });
     }
+
+    /// <summary>
+    /// Persists the instant_mode state back to the config file so an in-game
+    /// toggle stays in sync with the conf (and survives restarts). No-op when the
+    /// value is unchanged. Called from the settings-UI Harmony patches, which run
+    /// on the main thread.
+    /// </summary>
+    private static void SetInstantModeConfig(bool enabled)
+    {
+        if (_config.InstantMode == enabled) return;
+        _config.InstantMode = enabled;
+        SaveConfig();
+    }
+
+    /// <summary>
+    /// Writes the current in-memory config back to STS2_MCP.conf, preserving all
+    /// known keys. Best-effort and never fatal.
+    /// </summary>
+    private static void SaveConfig()
+    {
+        try
+        {
+            string? modDir = Path.GetDirectoryName(
+                System.Reflection.Assembly.GetExecutingAssembly().Location);
+            if (modDir == null) return;
+
+            string configPath = Path.Combine(modDir, ConfigFileName);
+            var data = new Dictionary<string, object>
+            {
+                ["port"] = _config.Port,
+                ["instant_mode"] = _config.InstantMode,
+            };
+            File.WriteAllText(configPath, JsonSerializer.Serialize(data, _jsonOptions));
+            GD.Print($"[STS2 MCP] Config saved (instant_mode={_config.InstantMode})");
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[STS2 MCP] Failed to save config: {ex.Message}");
+        }
+    }
 }
