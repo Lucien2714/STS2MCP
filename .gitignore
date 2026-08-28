@@ -1,7 +1,7 @@
 bin/
 obj/
 out/
-
+lib/
 # Python
 __pycache__/
 *.pyc
@@ -13,6 +13,12 @@ mcp/.venv/
 .mcp.json
 CLAUDE.md
 GUIDE.md
+
+# Machine-local build config (game install path)
+Directory.Build.props
+
+# Rider / ReSharper per-user settings
+*.DotSettings.user
 
 # Qoder
 .qoder.json
