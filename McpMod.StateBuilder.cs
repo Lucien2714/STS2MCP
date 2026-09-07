@@ -1344,7 +1344,16 @@ public static partial class McpMod
         // Powers (status effects)
         state["status"] = BuildPowersState(creature);
 
-        // Relics
+        state["relics"] = BuildRelicsList(player);
+        state["potions"] = BuildPotionsList(player);
+        state["max_potion_slots"] = player.MaxPotionCount;
+
+        return state;
+    }
+
+    // Shared by the state endpoints' player object and GET /api/v1/player.
+    private static List<Dictionary<string, object?>> BuildRelicsList(Player player)
+    {
         var relics = new List<Dictionary<string, object?>>();
         foreach (var relic in player.Relics)
         {
@@ -1357,9 +1366,12 @@ public static partial class McpMod
                 ["keywords"] = BuildHoverTips(relic.HoverTipsExcludingRelic)
             });
         }
-        state["relics"] = relics;
+        return relics;
+    }
 
-        // Potions
+    // Empty slots are skipped, so "slot" stays the index the use_potion action wants.
+    private static List<Dictionary<string, object?>> BuildPotionsList(Player player)
+    {
         var potions = new List<Dictionary<string, object?>>();
         int slotIndex = 0;
         foreach (var potion in player.PotionSlots)
@@ -1379,10 +1391,7 @@ public static partial class McpMod
             }
             slotIndex++;
         }
-        state["potions"] = potions;
-        state["max_potion_slots"] = player.MaxPotionCount;
-
-        return state;
+        return potions;
     }
 
     private static string GetCostDisplay(CardModel card)
@@ -1411,7 +1420,14 @@ public static partial class McpMod
             ["description"] = SafeGetCardDescription(card, pile),
             ["rarity"] = card.Rarity.ToString(),
             ["is_upgraded"] = card.IsUpgraded,
-            ["keywords"] = BuildHoverTips(card.HoverTips)
+            // Field name matches the wiki endpoint's already-shipped
+            // current_upgrade_level rather than introducing a second spelling.
+            ["current_upgrade_level"] = card.CurrentUpgradeLevel,
+            ["max_upgrade_level"] = card.MaxUpgradeLevel,
+            ["is_upgradable"] = card.IsUpgradable,
+            ["enchantment"] = BuildEnchantmentInfo(card.Enchantment),
+            ["affliction"] = BuildAfflictionInfo(card.Affliction),
+            ["keywords"] = BuildHoverTips(SafeGetHoverTips(card))
         };
     }
 
@@ -1466,14 +1482,10 @@ public static partial class McpMod
         var list = new List<Dictionary<string, object?>>();
         foreach (var card in cards)
         {
-            // Pile cards only need a subset - keep it lightweight
-            list.Add(new Dictionary<string, object?>
-            {
-                ["name"] = SafeGetText(() => card.Title),
-                ["cost"] = GetCostDisplay(card),
-                ["star_cost"] = GetStarCostDisplay(card),
-                ["description"] = SafeGetCardDescription(card, pile)
-            });
+            // Same shape as a hand card minus the hand-only fields (index,
+            // target_type, can_play), so identity, upgrade level and enchantment
+            // are readable wherever a card shows up.
+            list.Add(BuildCardInfo(card, pile));
         }
         return list;
     }
@@ -1644,7 +1656,9 @@ public static partial class McpMod
         if (fakeMerchantNode != null)
         {
             var proceedButton = FindFirst<NProceedButton>(fakeMerchantNode);
-            shopState["can_proceed"] = proceedButton?.IsEnabled ?? false;
+            var inventoryUI = FindFirst<NMerchantInventory>(fakeMerchantNode);
+            shopState["can_proceed"] = CanProceedFromMerchant(proceedButton, inventoryUI);
+            shopState["inventory_open"] = inventoryUI?.IsOpen ?? false;
         }
         else
         {
@@ -1729,7 +1743,9 @@ public static partial class McpMod
         if (inventory == null)
         {
             state["items"] = new List<Dictionary<string, object?>>();
-            state["can_proceed"] = NMerchantRoom.Instance?.ProceedButton?.IsEnabled ?? false;
+            state["can_proceed"] = CanProceedFromMerchant(
+                NMerchantRoom.Instance?.ProceedButton, NMerchantRoom.Instance?.Inventory);
+            state["inventory_open"] = NMerchantRoom.Instance?.Inventory?.IsOpen ?? false;
             state["error"] =
                 "Shop inventory is not ready yet (null). Often happens right after entering the merchant from the map; retry in a moment.";
             return state;
@@ -1825,10 +1841,28 @@ public static partial class McpMod
 
         state["items"] = items;
 
-        var proceedButton = NMerchantRoom.Instance?.ProceedButton;
-        state["can_proceed"] = proceedButton?.IsEnabled ?? false;
+        state["can_proceed"] = CanProceedFromMerchant(
+            NMerchantRoom.Instance?.ProceedButton, NMerchantRoom.Instance?.Inventory);
+        state["inventory_open"] = NMerchantRoom.Instance?.Inventory?.IsOpen ?? false;
 
         return state;
+    }
+
+    /// <summary>
+    /// Answers "can the agent call <c>proceed</c> right now?" rather than reporting the
+    /// raw button state. Reading shop state auto-opens the shopkeeper's inventory, and
+    /// both <c>NMerchantRoom.OpenInventory</c> and <c>NFakeMerchant.OpenInventory</c>
+    /// call <c>_proceedButton.Disable()</c> until <c>InventoryClosed</c> fires — so the
+    /// raw flag is false on essentially every shop read. <c>ExecuteProceed</c> closes the
+    /// inventory first (and <c>NMerchantInventory.Close</c> emits <c>InventoryClosed</c>
+    /// synchronously, re-enabling the button in the same call stack), so an open
+    /// inventory does not actually block leaving the shop.
+    /// </summary>
+    private static bool CanProceedFromMerchant(NProceedButton? proceedButton, NMerchantInventory? inventory)
+    {
+        if (proceedButton == null)
+            return false;
+        return proceedButton.IsEnabled || inventory?.IsOpen == true;
     }
 
     private static Dictionary<string, object?> BuildMapState(RunState runState)
@@ -2070,7 +2104,10 @@ public static partial class McpMod
             state["prompt"] = prompt;
         }
 
-        // Cards in the grid (sorted by visual position - MoveToFront can reorder children)
+        // Cards in the grid (sorted by visual position - MoveToFront can reorder children).
+        // Picked cards stay in the grid, so flag them instead of making the agent
+        // remember what it already selected.
+        var selectedModels = GetSelectedCardModels(screen);
         var cardHolders = FindAllSortedByPosition<NGridCardHolder>(screen);
         var cards = new List<Dictionary<string, object?>>();
         int index = 0;
@@ -2081,10 +2118,19 @@ public static partial class McpMod
 
             var cardInfo = BuildCardInfo(card);
             cardInfo["index"] = index;
+            cardInfo["is_selected"] = selectedModels.Contains(card);
             cards.Add(cardInfo);
             index++;
         }
         state["cards"] = cards;
+
+        // How many cards are picked vs. how many the screen wants. MaxSelect can
+        // exceed what the grid holds ("select any number"), so clamp it to a number
+        // the agent can actually act on.
+        var (minSelect, maxSelect) = GetSelectionLimits(screen);
+        state["selected_count"] = selectedModels.Count;
+        state["min_select"] = minSelect;
+        state["max_select"] = maxSelect.HasValue ? (int?)Math.Min(maxSelect.Value, cards.Count) : null;
 
         // Preview container showing? (selection complete, awaiting confirm)
         // Upgrade screens use UpgradeSinglePreviewContainer / UpgradeMultiPreviewContainer
@@ -2172,10 +2218,18 @@ public static partial class McpMod
 
             var cardInfo = BuildCardInfo(card);
             cardInfo["index"] = index;
+            cardInfo["is_selected"] = false;
             cards.Add(cardInfo);
             index++;
         }
         state["cards"] = cards;
+
+        // Choose-a-card is one immediate pick - the screen resolves on click, so
+        // nothing is ever "already selected". Reported in the same shape as the grid
+        // screens so the agent branches on a single card_select contract.
+        state["selected_count"] = 0;
+        state["min_select"] = 1;
+        state["max_select"] = 1;
 
         var skipButton = screen.GetNodeOrNull<NClickableControl>("SkipButton");
         state["can_skip"] = skipButton?.IsEnabled == true && skipButton.Visible;
@@ -2271,6 +2325,7 @@ public static partial class McpMod
         }
 
         // Selectable cards (visible holders in the hand)
+        var selectedModels = GetSelectedCardModels(hand);
         var selectableCards = new List<Dictionary<string, object?>>();
         int index = 0;
         foreach (var holder in hand.ActiveHolders)
@@ -2281,32 +2336,54 @@ public static partial class McpMod
             var cardInfo = BuildCardInfo(card);
             cardInfo["index"] = index;
             cardInfo["description"] = SafeGetCardDescription(card); // hand cards use default pile
+            cardInfo["is_selected"] = selectedModels.Contains(card);
             selectableCards.Add(cardInfo);
             index++;
         }
         state["cards"] = selectableCards;
 
-        // Already-selected cards (in the SelectedHandCardContainer)
-        var selectedContainer = hand.GetNodeOrNull<Godot.Control>("%SelectedHandCardContainer");
-        if (selectedContainer != null)
+        // Already-selected cards. The hand's own _selectedCards is authoritative;
+        // fall back to the SelectedHandCardContainer holders if it is unreadable.
+        var selectedCards = new List<Dictionary<string, object?>>();
+        foreach (var model in selectedModels)
         {
-            var selectedCards = new List<Dictionary<string, object?>>();
-            var selectedHolders = FindAll<NSelectedHandCardHolder>(selectedContainer);
-            int selIdx = 0;
-            foreach (var holder in selectedHolders)
+            selectedCards.Add(new Dictionary<string, object?>
             {
-                var card = holder.CardModel;
-                if (card == null) continue;
-                selectedCards.Add(new Dictionary<string, object?>
-                {
-                    ["index"] = selIdx,
-                    ["name"] = SafeGetText(() => card.Title)
-                });
-                selIdx++;
-            }
-            if (selectedCards.Count > 0)
-                state["selected_cards"] = selectedCards;
+                ["index"] = selectedCards.Count,
+                ["name"] = SafeGetText(() => model.Title)
+            });
         }
+
+        if (selectedCards.Count == 0)
+        {
+            var selectedContainer = hand.GetNodeOrNull<Godot.Control>("%SelectedHandCardContainer");
+            if (selectedContainer != null)
+            {
+                foreach (var holder in FindAll<NSelectedHandCardHolder>(selectedContainer))
+                {
+                    var card = holder.CardModel;
+                    if (card == null) continue;
+                    selectedCards.Add(new Dictionary<string, object?>
+                    {
+                        ["index"] = selectedCards.Count,
+                        ["name"] = SafeGetText(() => card.Title)
+                    });
+                }
+            }
+        }
+
+        state["selected_count"] = selectedCards.Count;
+        if (selectedCards.Count > 0)
+            state["selected_cards"] = selectedCards;
+
+        // How many the prompt wants. Picked cards leave the hand for the selected
+        // container, so the ceiling is what is still selectable plus what is already
+        // picked - a guard against an unbounded MaxSelect, not a per-card rule.
+        var (minSelect, maxSelect) = GetSelectionLimits(hand);
+        state["min_select"] = minSelect;
+        state["max_select"] = maxSelect.HasValue
+            ? (int?)Math.Min(maxSelect.Value, selectableCards.Count + selectedCards.Count)
+            : null;
 
         // Confirm button state
         var confirmBtn = hand.GetNodeOrNull<NConfirmButton>("%SelectModeConfirmButton");

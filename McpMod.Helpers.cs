@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using Godot;
+using MegaCrit.Sts2.Core.CardSelection;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.HoverTips;
 using MegaCrit.Sts2.Core.Models;
@@ -180,6 +181,49 @@ public static partial class McpMod
         return null;
     }
 
+    /// <summary>
+    /// Reads MinSelect/MaxSelect off a card-selection owner's private
+    /// <c>_prefs</c> (CardSelectorPrefs). Every grid selection screen carries
+    /// one, as does NPlayerHand during in-combat selection. Returns nulls when
+    /// the field is absent (the choose-a-card screen has no prefs) or a game
+    /// update renames it.
+    /// </summary>
+    private static (int? Min, int? Max) GetSelectionLimits(object owner)
+    {
+        try
+        {
+            if (GetInstanceFieldValue(owner, "_prefs") is CardSelectorPrefs prefs)
+                return (prefs.MinSelect, prefs.MaxSelect);
+        }
+        catch { }
+
+        return (null, null);
+    }
+
+    /// <summary>
+    /// Reads the currently picked cards off a selection owner's private
+    /// <c>_selectedCards</c> (a HashSet on the grid screens, a List on
+    /// NPlayerHand). Returns an empty list when the field is unreadable.
+    /// </summary>
+    private static List<CardModel> GetSelectedCardModels(object owner)
+    {
+        var selected = new List<CardModel>();
+        try
+        {
+            if (GetInstanceFieldValue(owner, "_selectedCards") is IEnumerable<CardModel> models)
+            {
+                foreach (var model in models)
+                {
+                    if (model != null)
+                        selected.Add(model);
+                }
+            }
+        }
+        catch { }
+
+        return selected;
+    }
+
     private static void AddMenuOptionIfVisible(
         List<Dictionary<string, object?>> options,
         object owner,
@@ -240,6 +284,37 @@ public static partial class McpMod
         }
         catch (ObjectDisposedException) { }
     }
+
+    // HoverTips can run card hooks that expect a live combat, and cards are now
+    // serialized on every screen (deck reads, shops, selection overlays), so never
+    // let one bad tip take the whole response down.
+    private static IEnumerable<IHoverTip> SafeGetHoverTips(CardModel card)
+    {
+        try { return card.HoverTips; }
+        catch { return Array.Empty<IHoverTip>(); }
+    }
+
+    // Enchantments and afflictions are per-instance card modifiers. Both are omitted
+    // from JSON when null (_jsonOptions ignores nulls), so unmodified cards pay nothing.
+    private static Dictionary<string, object?>? BuildEnchantmentInfo(EnchantmentModel? enchantment)
+        => enchantment == null
+            ? null
+            : new Dictionary<string, object?>
+            {
+                ["id"] = enchantment.Id.Entry,
+                ["name"] = SafeGetText(() => enchantment.Title),
+                ["description"] = SafeGetText(() => enchantment.DynamicDescription)
+            };
+
+    private static Dictionary<string, object?>? BuildAfflictionInfo(AfflictionModel? affliction)
+        => affliction == null
+            ? null
+            : new Dictionary<string, object?>
+            {
+                ["id"] = affliction.Id.Entry,
+                ["name"] = SafeGetText(() => affliction.Title),
+                ["description"] = SafeGetText(() => affliction.DynamicDescription)
+            };
 
     private static List<Dictionary<string, object?>> BuildHoverTips(IEnumerable<IHoverTip> tips)
     {

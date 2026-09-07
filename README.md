@@ -104,6 +104,14 @@ The MCP server accepts `--host` and `--port` options if you need non-default set
 
 Flag `--no-trust-env` can be used to disable `requests` from picking up proxy settings from the environment, which can cause connection issues if you are running the server in a container.
 
+### Player and Deck Data
+
+- `GET /api/v1/player` returns run-level detail for the local player: character, HP,
+  gold, relics, potions, and the full master deck (identical copies grouped with a
+  `quantity`). This is the only way to see the run deck — the state endpoints report
+  per-combat piles. Works in both singleplayer and multiplayer; exposed to MCP as
+  `get_player()`.
+
 ### Profile and Compendium Data
 
 The HTTP API exposes profile-level progress separately from live run state:

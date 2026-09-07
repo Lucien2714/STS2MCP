@@ -429,7 +429,7 @@ public static partial class McpMod
                     string keywords = card.TryGetValue("keywords", out var kw) && kw is List<string> kwList && kwList.Count > 0
                         ? $" [{string.Join(", ", kwList)}]" : "";
                     string starCost = card.TryGetValue("star_cost", out var sc) && sc != null ? $" + {sc} star" : "";
-                    sb.AppendLine($"- [{card["index"]}] **{card["name"]}** ({card["cost"]} energy{starCost}) [{card["type"]}] {playable}{keywords} - {card["description"]} (target: {card["target_type"]})");
+                    sb.AppendLine($"- [{card["index"]}] **{card["name"]}** ({card["cost"]} energy{starCost}) [{card["type"]}]{FormatCardModifiers(card)} {playable}{keywords} - {card["description"]} (target: {card["target_type"]})");
                 }
                 sb.AppendLine();
             }
@@ -526,7 +526,7 @@ public static partial class McpMod
             foreach (var card in pile)
             {
                 string starCost = card.TryGetValue("star_cost", out var sc) && sc != null ? $" + {sc} star" : "";
-                sb.AppendLine($"- {card["name"]} ({card["cost"]}{starCost}): {card["description"]}");
+                sb.AppendLine($"- {card["name"]} ({card["cost"]}{starCost}){FormatCardModifiers(card)}: {card["description"]}");
             }
         }
         else
@@ -832,6 +832,27 @@ public static partial class McpMod
         sb.AppendLine();
     }
 
+    /// <summary>
+    /// Renders the "x of y picked" line shared by the hand and grid selection
+    /// screens. Returns null when the state carries no selection limits.
+    /// </summary>
+    private static string? FormatSelectionProgress(Dictionary<string, object?> selectState)
+    {
+        int selected = selectState.TryGetValue("selected_count", out var sel) && sel is int selCount ? selCount : 0;
+        int? min = selectState.TryGetValue("min_select", out var mn) && mn is int minCount ? minCount : null;
+        int? max = selectState.TryGetValue("max_select", out var mx) && mx is int maxCount ? maxCount : null;
+
+        if (min == null && max == null)
+            return null;
+        if (min == max)
+            return $"**Selected:** {selected}/{max}";
+        if (max == null)
+            return $"**Selected:** {selected} (select at least {min})";
+        if (min is null or 0)
+            return $"**Selected:** {selected} (select up to {max})";
+        return $"**Selected:** {selected} (select {min}-{max})";
+    }
+
     private static void FormatHandSelectMarkdown(StringBuilder sb, Dictionary<string, object?> handSelect)
     {
         sb.AppendLine("## In-Combat Card Selection");
@@ -843,6 +864,10 @@ public static partial class McpMod
         string mode = handSelect.TryGetValue("mode", out var m) ? m?.ToString() ?? "simple_select" : "simple_select";
         if (mode == "upgrade_select")
             sb.AppendLine("**Mode:** Upgrade selection");
+
+        string? progress = FormatSelectionProgress(handSelect);
+        if (progress != null)
+            sb.AppendLine(progress);
         sb.AppendLine();
 
         if (handSelect.TryGetValue("cards", out var cardsObj) && cardsObj is List<Dictionary<string, object?>> cards && cards.Count > 0)
@@ -851,7 +876,8 @@ public static partial class McpMod
             foreach (var card in cards)
             {
                 string starCost = card.TryGetValue("star_cost", out var sc) && sc != null ? $" + {sc} star" : "";
-                sb.AppendLine($"- [{card["index"]}] **{card["name"]}** ({card["cost"]} energy{starCost}) [{card["type"]}] - {card["description"]}");
+                string selectedMark = card.TryGetValue("is_selected", out var isSel) && isSel is true ? " [SELECTED]" : "";
+                sb.AppendLine($"- [{card["index"]}] **{card["name"]}** ({card["cost"]} energy{starCost}) [{card["type"]}]{selectedMark} - {card["description"]}");
             }
             sb.AppendLine();
         }
@@ -886,6 +912,10 @@ public static partial class McpMod
         {
             sb.AppendLine($"*{promptObj}*");
         }
+
+        string? progress = FormatSelectionProgress(cardSelect);
+        if (progress != null)
+            sb.AppendLine(progress);
         sb.AppendLine();
 
         if (cardSelect.TryGetValue("cards", out var cardsObj) && cardsObj is List<Dictionary<string, object?>> cards)
@@ -894,7 +924,8 @@ public static partial class McpMod
             foreach (var card in cards)
             {
                 string starCost = card.TryGetValue("star_cost", out var sc) && sc != null ? $" + {sc} star" : "";
-                sb.AppendLine($"- [{card["index"]}] **{card["name"]}** ({card["cost"]} energy{starCost}) [{card["type"]}] {card["rarity"]} - {card["description"]}");
+                string selectedMark = card.TryGetValue("is_selected", out var isSel) && isSel is true ? " [SELECTED]" : "";
+                sb.AppendLine($"- [{card["index"]}] **{card["name"]}** ({card["cost"]} energy{starCost}) [{card["type"]}] {card["rarity"]}{selectedMark} - {card["description"]}");
             }
             sb.AppendLine();
         }
@@ -1043,6 +1074,28 @@ public static partial class McpMod
         if (canProceed)
             sb.AppendLine("**Can proceed:** Yes");
         sb.AppendLine();
+    }
+
+    // Enchantments and afflictions change what a card does, so surface them inline
+    // rather than leaving markdown readers to infer them from the rules text.
+    private static string FormatCardModifiers(Dictionary<string, object?> card)
+    {
+        var sb = new StringBuilder();
+        AppendCardModifier(sb, card, "enchantment", "enchanted");
+        AppendCardModifier(sb, card, "affliction", "afflicted");
+        return sb.ToString();
+    }
+
+    private static void AppendCardModifier(
+        StringBuilder sb, Dictionary<string, object?> card, string key, string label)
+    {
+        if (card.TryGetValue(key, out var value)
+            && value is Dictionary<string, object?> modifier
+            && modifier.TryGetValue("name", out var name)
+            && name is string { Length: > 0 } modifierName)
+        {
+            sb.Append($" [{label}: {modifierName}]");
+        }
     }
 
     private static string FormatStatusAmount(object? amount)

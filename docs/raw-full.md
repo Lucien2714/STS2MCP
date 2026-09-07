@@ -7,6 +7,7 @@ HTTP API served by the STS2_MCP mod on `localhost:15526`. No authentication. Loc
 - `POST /api/v1/singleplayer` — perform a game action
 - `GET  /api/v1/multiplayer` — read multiplayer game state
 - `POST /api/v1/multiplayer` — perform a multiplayer action
+- `GET  /api/v1/player` — read run-level player detail incl. the full deck
 - `GET  /api/v1/profile` — read current profile progress
 - `GET  /api/v1/compendium` — read Compendium-shaped profile progress
 - `GET  /api/v1/wiki` — fuzzy-search discovered card/relic wiki entries
@@ -106,35 +107,52 @@ Always present at the top level (except `menu`). Contains everything about the l
 }
 ```
 
-### Card Object (in hand)
+### Card Object
+
+The shared card shape. Used for hand cards, draw/discard/exhaust pile cards, card rewards, shop cards, selection overlays, and the deck entries returned by `GET /api/v1/player`. Contexts add fields on top (a hand card adds `index`, `target_type`, `can_play`, `unplayable_reason`; a deck entry adds `quantity` and `floors_added`).
 
 ```jsonc
 {
-  "index": 0,
   "id": "STRIKE_R",
   "name": "Strike",
-  "type": "Attack",          // Attack, Skill, Power, Status, Curse
-  "cost": "1",               // Energy cost as string ("X" for X-cost)
-  "star_cost": null,         // Regent star cost as string, null if N/A
+  "type": "Attack",             // Attack, Skill, Power, Status, Curse, Quest
+  "rarity": "Basic",            // Basic, Common, Uncommon, Rare, Ancient, Event, Token, Status, Curse, Quest
+  "cost": "1",                  // Energy cost as string ("X" for X-cost)
+  "star_cost": null,            // Regent star cost as string, omitted if N/A
   "description": "Deal 6 damage.",
+  "is_upgraded": false,
+  "current_upgrade_level": 0,   // 0 when unupgraded
+  "max_upgrade_level": 1,       // How far this card can be upgraded
+  "is_upgradable": true,        // False once current_upgrade_level == max_upgrade_level
+  "enchantment": {              // Omitted when the card carries no enchantment
+    "id": "SHARPENED",
+    "name": "Sharpened",
+    "description": "Deal 3 additional damage."
+  },
+  "affliction": null,           // Same shape as enchantment; omitted when unafflicted
+  "keywords": [ /* Keyword Objects */ ]
+}
+```
+
+`current_upgrade_level` matches the field name `GET /api/v1/wiki` already uses, so upgrade level has one spelling across the whole API. Null fields are omitted from JSON, so `enchantment`, `affliction`, and `star_cost` are absent rather than `null` on cards that don't have them.
+
+### Card Object (in hand)
+
+A Card Object plus the fields that only make sense while the card is playable:
+
+```jsonc
+{
+  // ... all Card Object fields ...
+  "index": 0,
   "target_type": "AnyEnemy", // None, Self, AnyEnemy, AllEnemies, etc.
   "can_play": true,
-  "unplayable_reason": null, // e.g. "NotEnoughEnergy", "Unplayable", null if playable
-  "is_upgraded": false,
-  "keywords": [ /* Keyword Objects */ ]
+  "unplayable_reason": null  // e.g. "NotEnoughEnergy", "Unplayable", null if playable
 }
 ```
 
 ### Pile Card Object (draw/discard/exhaust piles)
 
-```jsonc
-{
-  "name": "Strike",
-  "cost": "1",               // Energy cost as string ("X" for X-cost)
-  "star_cost": null,          // Regent star cost as string, null if N/A
-  "description": "Deal 6 damage."
-}
-```
+A plain Card Object — identical to a hand card minus `index`, `target_type`, `can_play`, and `unplayable_reason`. `description` is rendered for the pile the card is in.
 
 ### Orb Object
 
@@ -479,6 +497,9 @@ Appears when a card effect prompts "Select a card to exhaust/discard/upgrade". *
   "hand_select": {
     "mode": "simple_select",     // "simple_select" or "upgrade_select"
     "prompt": "Select a card to Exhaust.",
+    "selected_count": 1,         // How many cards are picked so far
+    "min_select": 2,             // Fewest the prompt accepts, null if unknown
+    "max_select": 2,             // Most the prompt accepts, null if unknown
     "cards": [
       {
         "index": 0,
@@ -489,6 +510,7 @@ Appears when a card effect prompts "Select a card to exhaust/discard/upgrade". *
         "star_cost": null,       // Regent star cost as string, null if N/A
         "description": "Deal 6 damage.",
         "is_upgraded": false,
+        "is_selected": false,    // true once picked via combat_select_card
         "keywords": [ /* Keyword Objects */ ]
       }
     ],
@@ -726,13 +748,20 @@ Shop inventory is auto-opened when state is queried.
         "can_afford": true
       }
     ],
-    "can_proceed": true,
+    "can_proceed": true,       // Whether `proceed` will work now — see note below
+    "inventory_open": true,    // Whether the shopkeeper's inventory overlay is open
     "error": "..."             // Only present if inventory isn't ready; retry in a moment
   },
   "run": { ... },
   "player": { ... }
 }
 ```
+
+**`can_proceed` answers "will `proceed` work right now?", not "is the proceed button enabled?"**
+
+Reading shop state auto-opens the shopkeeper's inventory, and the game disables the proceed button while that overlay is open (`NMerchantRoom.OpenInventory` calls `_proceedButton.Disable()`, re-enabling it only when `InventoryClosed` fires). The raw button flag is therefore false on essentially every shop read. The `proceed` action closes the inventory first, so an open inventory does not block leaving — `can_proceed` reports `true` in that case. Use `inventory_open` if you need the raw overlay state.
+
+The same applies to `fake_merchant`.
 
 ### `fake_merchant` — Fake Merchant Event
 
@@ -759,7 +788,8 @@ A relic-only shop disguised as an event. Uses `shop_purchase` and `proceed` acti
           "keywords": [ /* Keyword Objects */ ]
         }
       ],
-      "can_proceed": true
+      "can_proceed": true,     // Same semantics as the regular shop — see `shop` above
+      "inventory_open": true
     },
     // After fight:
     // "started_fight": true,
@@ -810,6 +840,9 @@ Covers deck transforms, upgrades, removals, and choose-a-card effects. Appears o
   "card_select": {
     "screen_type": "transform",  // transform, upgrade, select, simple_select, choose
     "prompt": "Choose 2 cards to Transform.",
+    "selected_count": 1,         // How many cards are picked so far
+    "min_select": 2,             // Fewest the screen accepts, null if unknown
+    "max_select": 2,             // Most the screen accepts, null if unknown
     "cards": [
       {
         "index": 0,
@@ -821,6 +854,7 @@ Covers deck transforms, upgrades, removals, and choose-a-card effects. Appears o
         "description": "Deal 6 damage.",
         "rarity": "Common",
         "is_upgraded": false,
+        "is_selected": false,    // true once picked via select_card
         "keywords": [ /* Keyword Objects */ ]
       }
     ],
@@ -828,7 +862,8 @@ Covers deck transforms, upgrades, removals, and choose-a-card effects. Appears o
     "can_confirm": false,        // true when confirm button is available
     "can_cancel": true           // true when close/cancel button is available
 
-    // For "choose" type: picking is immediate (no confirm needed).
+    // For "choose" type: picking is immediate (no confirm needed), so
+    // min_select/max_select are 1 and selected_count is always 0.
     // can_skip indicates if a skip button exists.
   },
   "run": { ... },
@@ -976,6 +1011,57 @@ Prevents soft-locks when an unrecognized overlay is active.
   },
   "run": { ... },
   "player": { ... }
+}
+```
+
+---
+
+## Player Detail
+
+### `GET /api/v1/player`
+
+Run-level detail for the local player. Independent of the singleplayer and multiplayer run endpoints — it only reads the local player and enqueues nothing, so it works in either mode and never returns 409.
+
+This is the only endpoint that exposes the **master deck**. State responses only show combat piles (hand / draw / discard / exhaust), which hold per-combat copies; `deck` here is the run-level card list at any point, including mid-combat.
+
+Combat-only detail (block, energy, hand, piles, orbs, status) is intentionally *not* repeated here — read game state for that.
+
+Response format is JSON only (no `format=markdown`).
+
+```jsonc
+{
+  "in_run": true,
+  "is_multiplayer": false,
+  "character": "The Ironclad",
+  "hp": 72,
+  "max_hp": 80,
+  "gold": 99,
+  "relics": [ /* same shape as player.relics in game state */ ],
+  "potions": [ /* same shape as player.potions in game state */ ],
+  "max_potion_slots": 3,
+  "deck": {
+    "count": 14,              // Total cards in the deck
+    "unique_count": 6,        // Number of grouped entries below
+    "upgraded_count": 3,      // Cards with current_upgrade_level > 0
+    "counts_by_type": { "Attack": 6, "Skill": 7, "Power": 1 },
+    "cards": [ /* Deck Card Objects */ ]
+  }
+}
+```
+
+When no run is active (or the local player is not ready yet), the response is `{ "in_run": false, "error": "..." }` with HTTP 200.
+
+#### Deck Card Object
+
+A Card Object plus two deck-only fields. Identical copies are collapsed into one entry with a `quantity`; two copies group together only when card id, upgrade level, enchantment, affliction, cost, and rules text all match.
+
+Entries are sorted by card type (Attack, Skill, Power, Status, Curse), then name, then upgrade level — stable across calls.
+
+```jsonc
+{
+  // ... all Card Object fields ...
+  "quantity": 2,             // How many identical copies are in the deck
+  "floors_added": [12]       // Floors these copies joined the deck on; omitted for starter cards
 }
 ```
 
@@ -1154,14 +1240,44 @@ All POST requests use a JSON body with an `"action"` field and action-specific p
 
 ### Success Response
 
+Every action response embeds the resulting game state under `state` — the same object
+`GET` on the same endpoint returns (singleplayer state on `/api/v1/singleplayer`,
+multiplayer state on `/api/v1/multiplayer`). There is no need to follow an action with
+a `GET`.
+
 ```jsonc
-{ "status": "ok", "message": "Playing 'Strike' targeting Jaw Worm" }
+{
+  "status": "ok",
+  "message": "Playing 'Strike' targeting Jaw Worm",
+  "state": { "state_type": "monster", "player": { /* ... */ }, "battle": { /* ... */ } }
+}
 ```
+
+The mod waits for the game to settle before capturing that state: the action queue is
+drained and, in combat, the local player is back in the play phase — so an `end_turn`
+response already carries the state of your **next** turn, after the enemies have acted.
+
+A screen that is itself waiting on you counts as settled and returns immediately: a
+blocking popup, and the selection screens (`hand_select`, `card_select`,
+`bundle_select`, `relic_select`). The game cannot advance past those until you act, so
+the response carries the selection screen, **not** the resolved effect — keep selecting
+or confirming until the state moves on.
+
+The wait is capped at 8 seconds; if it expires, the state is returned as-is plus
+`"state_wait_timed_out": true` (poll with `GET` until `battle.is_play_phase` is true).
+If the state cannot be read at all, `state` is replaced by `state_error`.
 
 ### Error Response
 
+Rejected actions changed nothing, so their `state` is captured immediately without
+waiting.
+
 ```jsonc
-{ "status": "error", "error": "Card requires a target. Provide 'target' with an entity_id." }
+{
+  "status": "error",
+  "error": "Card requires a target. Provide 'target' with an entity_id.",
+  "state": { "state_type": "monster", /* ... */ }
+}
 ```
 
 ---

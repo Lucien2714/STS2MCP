@@ -221,6 +221,14 @@ public static partial class McpMod
                 else
                     SendError(response, 405, "Method not allowed");
             }
+            else if (path == "/api/v1/player")
+            {
+                // Read-only and local-player-scoped, so no SP/MP 409 split here.
+                if (request.HttpMethod == "GET")
+                    HandleGetPlayerDetail(response);
+                else
+                    SendError(response, 405, "Method not allowed");
+            }
             else if (path == "/api/v1/compendium")
             {
                 if (request.HttpMethod == "GET")
@@ -336,7 +344,7 @@ public static partial class McpMod
                 var seed = parsed.TryGetValue("seed", out var seedElem) ? seedElem.GetString() : null;
                 var resultTask = RunOnMainThread(() => ExecuteMenuSelect(option, seed));
                 var result = resultTask.GetAwaiter().GetResult();
-                SendJson(response, result);
+                SendJson(response, WithGameState(result, BuildStateForCurrentRun));
             }
             catch (Exception ex)
             {
@@ -349,7 +357,7 @@ public static partial class McpMod
         {
             var resultTask = RunOnMainThread(() => ExecuteMultiplayerAction(action, parsed));
             var result = resultTask.GetAwaiter().GetResult();
-            SendJson(response, result);
+            SendJson(response, WithGameState(result, BuildMultiplayerGameState));
         }
         catch (Exception ex)
         {
@@ -434,7 +442,7 @@ public static partial class McpMod
                 var seed = parsed.TryGetValue("seed", out var seedElem) ? seedElem.GetString() : null;
                 var resultTask = RunOnMainThread(() => ExecuteMenuSelect(option, seed));
                 var result = resultTask.GetAwaiter().GetResult();
-                SendJson(response, result);
+                SendJson(response, WithGameState(result, BuildStateForCurrentRun));
             }
             catch (Exception ex)
             {
@@ -447,7 +455,7 @@ public static partial class McpMod
         {
             var resultTask = RunOnMainThread(() => ExecuteAction(action, parsed));
             var result = resultTask.GetAwaiter().GetResult();
-            SendJson(response, result);
+            SendJson(response, WithGameState(result, BuildGameState));
         }
         catch (Exception ex)
         {

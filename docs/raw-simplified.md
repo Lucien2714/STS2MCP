@@ -6,6 +6,7 @@ HTTP API on `localhost:15526`. No authentication.
 - `POST /api/v1/singleplayer` — perform action
 - `GET /api/v1/multiplayer` — read multiplayer state
 - `POST /api/v1/multiplayer` — perform multiplayer action
+- `GET /api/v1/player` — read run-level player detail incl. the full deck
 - `GET /api/v1/profile` — read current profile progress
 - `GET /api/v1/compendium` — read Compendium-shaped profile progress
 - `GET /api/v1/wiki` — fuzzy-search discovered card/relic wiki entries
@@ -26,6 +27,22 @@ Every JSON response includes:
 - `state_type` — which screen the game is on (see below)
 - `run` — `{ act, floor, ascension }` (absent for `menu`)
 - `player` — full player state: character, HP, gold, relics, potions, `max_potion_slots` (belt capacity, grows with relics), and during combat: energy, hand, piles, orbs (absent for `menu`)
+
+## Card Object
+
+One shape for every card, wherever it appears — hand, draw/discard/exhaust piles, card rewards, shop, selection overlays, and the deck from `GET /api/v1/player`:
+
+```jsonc
+{
+  "id": "STRIKE_R", "name": "Strike", "type": "Attack", "rarity": "Basic",
+  "cost": "1", "star_cost": null, "description": "Deal 6 damage.",
+  "is_upgraded": false, "current_upgrade_level": 0,
+  "max_upgrade_level": 1, "is_upgradable": true,
+  "enchantment": null, "affliction": null, "keywords": []
+}
+```
+
+Null fields are omitted from JSON, so `enchantment`, `affliction`, and `star_cost` are simply absent on cards without them. Hand cards add `index`, `target_type`, `can_play`, `unplayable_reason`. Deck entries add `quantity` and `floors_added`. `current_upgrade_level` uses the same name as the wiki endpoint.
 
 | `state_type` | Screen | Available Actions |
 |---|---|---|
@@ -52,13 +69,29 @@ Every JSON response includes:
 
 ## POST — Actions
 
-All POST requests use JSON body with `"action"` field. All responses include `{ "status": "ok" | "error", "message": "..." }`.
+All POST requests use JSON body with `"action"` field. All responses include `{ "status": "ok" | "error", "message": "..." }` plus a `state` object holding the full post-action game state — the same object a `GET` on that endpoint returns — so you do not need to re-read state after acting. The mod waits for the game to settle first (action queue drained, and in combat the player back in the play phase), so an `end_turn` response already shows your next turn after the enemies acted. Screens that are themselves waiting on you — blocking popups and the selection screens (`hand_select`, `card_select`, `bundle_select`, `relic_select`) — count as settled and come back immediately, carrying that screen rather than the resolved effect. The wait is capped at 8s; on expiry the response adds `"state_wait_timed_out": true`. Rejected actions return their state immediately without waiting.
 
 ### Menu / Game Over
 
 | Action | Parameters | When to Use |
 |---|---|---|
 | `menu_select` | `option`: string, `seed`?: string | Choose an advertised menu option. Options are case-insensitive. Submenus include `back` where visible, including `profile_select` options `profile_1`, `profile_2`, `profile_3`, and `back`. Blocking popups expose normalized button labels such as `ignore` or `back`. `game_over` supports `main_menu` only; `continue` returns an error. Supplying `seed` in unsupported contexts such as standard singleplayer character select returns an error and does not start a run. If Timeline has pending obtained epochs that require manual reveal, it may appear in `blocked_options`; selecting `timeline` returns `manual_action_required: true` with `pending_epoch_ids` instead of opening Timeline. Multiplayer flow: on `multiplayer_join` use `refresh` / `back` / `join_<index>` / `join_<player_id>`. On `multiplayer_load_lobby` use `confirm` (or `embark`) to ready up, `unready` to retract, `back` to leave. On `character_select` while in MP, an additional `unready` option becomes available after readying, plus a `lobby` block in state lists ascension, all_ready, and per-player roster. On `custom_run` (Custom mode setup), options also include `modifier_<key>` (or the bare `key`, or the raw `id` when unambiguous) to toggle each run modifier — the response returns the resulting `modifiers` list because some modifiers are mutually exclusive — and the state adds a `modifiers` list (`id`, `key`, `option`, `title`, `description`, `ticked`) plus an optional `seed`; unlike standard SP character select, `seed` is supported here. `key` is the unique selectable name: it equals `id` except for the per-character card modifiers, which all share the id `CHARACTER_CARDS` and are keyed `CHARACTER_CARDS_<character id>`. On both `character_select` and `custom_run`, `ascension_up` / `ascension_down` adjust the ascension level (advertised only while that direction is available), the state carries an `ascension` block (`level`, `max`), and a `selected` block reflects the current on-screen selection (chosen character + enabled modifier ids). |
+
+### Player Detail
+
+`GET /api/v1/player` returns run-level detail for the local player: `character`, `hp`, `max_hp`, `gold`, `relics`, `potions`, `max_potion_slots`, and `deck`. Works in both singleplayer and multiplayer (no 409). JSON only. Outside a run it returns `{ "in_run": false, "error": ... }`.
+
+This is the **only** way to read the master deck — game state exposes combat piles (hand/draw/discard/exhaust), which are per-combat copies. Combat-only fields are not repeated here; read game state for those.
+
+```jsonc
+"deck": {
+  "count": 14, "unique_count": 6, "upgraded_count": 3,
+  "counts_by_type": { "Attack": 6, "Skill": 7, "Power": 1 },
+  "cards": [ /* Card Object + "quantity" + "floors_added" */ ]
+}
+```
+
+Identical copies collapse into one entry with `quantity`; they group only when id, upgrade level, enchantment, affliction, cost, and rules text all match. `floors_added` keeps the union of floors those copies were added on (omitted for starter cards). Sorted by type, then name, then upgrade level.
 
 ### Profiles
 
@@ -122,6 +155,9 @@ Example searches:
 | `combat_select_card` | `card_index`: int | Select/deselect a card during "choose a card to exhaust/discard" prompts. |
 | `combat_confirm_selection` | _(none)_ | Confirm the hand card selection. |
 
+`hand_select.selected_count` / `min_select` / `max_select` say how many cards are
+picked and how many the prompt wants; each entry in `cards` carries `is_selected`.
+
 ### Rewards (`rewards`)
 
 | Action | Parameters | When to Use |
@@ -163,7 +199,9 @@ Example searches:
 | Action | Parameters | When to Use |
 |---|---|---|
 | `shop_purchase` | `index`: int | Buy an item by its index. Must be stocked and affordable. |
-| `proceed` | _(none)_ | Leave the shop. |
+| `proceed` | _(none)_ | Leave the shop. Closes the shopkeeper's inventory first if it's open. |
+
+`can_proceed` means "will `proceed` work now", not "is the proceed button enabled". Reading shop state auto-opens the inventory, which the game disables the proceed button behind; `proceed` closes it first, so this stays `true`. `inventory_open` carries the raw overlay state. Same for `fake_merchant`.
 
 ### Treasure (`treasure`)
 
@@ -179,6 +217,9 @@ Example searches:
 | `select_card` | `index`: int | Grid screens: toggle card selection. Choose-a-card: pick immediately. |
 | `confirm_selection` | _(none)_ | Confirm (for grid screens with preview). Not needed for choose-a-card. |
 | `cancel_selection` | _(none)_ | Cancel preview, skip (choose-a-card), or close screen. |
+
+`card_select.selected_count` / `min_select` / `max_select` say how many cards are
+picked and how many the screen wants; each entry in `cards` carries `is_selected`.
 
 ### Bundle Selection Overlay (`bundle_select`)
 

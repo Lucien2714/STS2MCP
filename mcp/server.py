@@ -2,6 +2,9 @@
 
 Connects to the STS2_MCP mod's HTTP server and exposes game actions
 as MCP tools for Claude Desktop / Claude Code.
+
+Every action tool returns the post-action game state alongside the result, so a
+separate get_game_state call after acting is normally unnecessary.
 """
 
 import argparse
@@ -29,6 +32,10 @@ def _mp_url() -> str:
 
 def _profile_url() -> str:
     return f"{_base_url}/api/v1/profile"
+
+
+def _player_url() -> str:
+    return f"{_base_url}/api/v1/player"
 
 
 def _compendium_url() -> str:
@@ -76,6 +83,12 @@ async def _mp_post(body: dict) -> str:
 
 async def _profile_get() -> str:
     r = await _get_client().get(_profile_url())
+    r.raise_for_status()
+    return r.text
+
+
+async def _player_get() -> str:
+    r = await _get_client().get(_player_url())
     r.raise_for_status()
     return r.text
 
@@ -166,6 +179,10 @@ async def get_game_state(format: str = "markdown") -> str:
     The state_type field indicates the current screen (combat, map, event, shop,
     fake_merchant, etc.).
 
+    Action tools already return this state under "state" in their response, so you
+    normally only need this to re-check state without acting (or after an action
+    reported "state_wait_timed_out").
+
     Args:
         format: "markdown" for human-readable output, "json" for structured data.
     """
@@ -233,6 +250,26 @@ async def get_profile() -> str:
     """
     try:
         return await _profile_get()
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool()
+async def get_player() -> str:
+    """Get run-level detail for the local player, including the full deck.
+
+    Covers current/max HP, gold, relics, potion belt, and the master deck. The deck
+    is the one thing game state never exposes: identical copies are grouped into a
+    single entry with a `quantity`, and each entry carries upgrade level,
+    enchantment, affliction, cost, and rules text. Use it when planning card
+    rewards, removals, upgrades, or transforms.
+
+    Works in both singleplayer and multiplayer runs. Combat-only detail (energy,
+    hand, draw/discard/exhaust piles) is not repeated here — read get_game_state
+    for that.
+    """
+    try:
+        return await _player_get()
     except Exception as e:
         return _handle_error(e)
 
@@ -415,7 +452,15 @@ async def combat_play_card(card_index: int, target: str | None = None) -> str:
 
 @mcp.tool()
 async def combat_end_turn() -> str:
-    """[Combat] End the player's current turn."""
+    """[Combat] End the player's current turn.
+
+    Blocks until the enemies have acted and the next player turn begins (up to 8s),
+    so the returned "state" is your new turn. If it carries "state_wait_timed_out",
+    poll get_game_state until battle.is_play_phase is true.
+
+    If an enemy turn raises a prompt that needs you (state_type "hand_select" or
+    "card_select"), the response returns on that screen instead - answer it first.
+    """
     try:
         return await _post({"action": "end_turn"})
     except Exception as e:
@@ -433,6 +478,9 @@ async def combat_select_card(card_index: int) -> str:
 
     Used when a card effect asks you to select a card to exhaust, discard, etc.
     This is different from deck_select_card which handles out-of-combat card selection overlays.
+
+    The game state's hand_select block reports progress: selected_count against
+    min_select/max_select, plus is_selected on each entry in cards.
 
     Args:
         card_index: 0-based index of the card in the selectable hand cards (as shown in game state).
@@ -605,6 +653,9 @@ async def deck_select_card(card_index: int) -> str:
     remove, discard) or pick a card from offered choices (potions, effects).
 
     For deck selections: toggles card selection. For choose-a-card: picks immediately.
+
+    The game state's card_select block reports progress: selected_count against
+    min_select/max_select, plus is_selected on each entry in cards.
 
     Args:
         card_index: 0-based index of the card (as shown in game state).
