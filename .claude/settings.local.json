@@ -37,7 +37,8 @@
       "mcp__sts2__mp_rewards_pick_card",
       "mcp__sts2__mp_shop_purchase",
       "mcp__sts2__mp_treasure_claim_relic",
-      "mcp__sts2__mp_rest_choose_option"
+      "mcp__sts2__mp_rest_choose_option",
+      "Bash(cd *)"
     ]
   },
   "enableAllProjectMcpServers": true,
