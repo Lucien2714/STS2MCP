@@ -619,6 +619,17 @@ async def event_choose_option(option_index: int) -> str:
     Works for both regular events and ancients (after dialogue ends).
     Also used to click the Proceed option after an event resolves.
 
+    Before choosing, read these fields on each option in the event state:
+      - text_key: locale-independent option id, e.g.
+        "TRASH_HEAP.pages.INITIAL.options.DIVE_IN". Match on this rather than on
+        title/description, which are localized display text.
+      - will_kill_player: the game's own lethality check for this option,
+        evaluated against your current HP. null means the option defines no such
+        check - it does NOT mean the option is safe.
+      - cards: full card objects the option grants, when it grants any.
+      - effects: the numbers the option's text names, e.g. {"hp_loss": 8}.
+        Absent when the effect has no number in its text (removing a card).
+
     Args:
         option_index: 0-based index of the option from the event state.
     """
@@ -633,6 +644,9 @@ async def event_advance_dialogue() -> str:
     """[Event] Advance ancient event dialogue.
 
     Click through dialogue text in ancient events. Call repeatedly until options appear.
+
+    The lines revealed so far are in event.dialogue.lines of the state, so read
+    what was said rather than clicking through blind.
     """
     try:
         return await _post({"action": "advance_dialogue"})

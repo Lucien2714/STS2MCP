@@ -541,6 +541,28 @@ public static partial class McpMod
         sb.AppendLine($"## {(isAncient ? "Ancient" : "Event")}: {name}");
         sb.AppendLine();
 
+        // The event's narrative text carries the actual stakes; the JSON has always
+        // had it under `body` but the markdown rendering used to drop it entirely.
+        string? body = evt.TryGetValue("body", out var b) ? b?.ToString() : null;
+        if (!string.IsNullOrWhiteSpace(body))
+        {
+            sb.AppendLine(body.Trim());
+            sb.AppendLine();
+        }
+
+        // The dialogue lines revealed so far. Rendered whether or not dialogue is still
+        // running, so the options below stay in the context of what was just said.
+        if (evt.TryGetValue("dialogue", out var dlgObj) && dlgObj is Dictionary<string, object?> dialogue
+            && dialogue.TryGetValue("lines", out var lnObj) && lnObj is List<Dictionary<string, object?>> dlgLines
+            && dlgLines.Count > 0)
+        {
+            sb.AppendLine("### Dialogue");
+            foreach (var line in dlgLines)
+                sb.AppendLine($"- **{line["speaker"]}:** {line["text"]}");
+            sb.AppendLine($"*({dlgLines.Count} of {dialogue.GetValueOrDefault("total_lines")} lines revealed)*");
+            sb.AppendLine();
+        }
+
         bool inDialogue = evt.TryGetValue("in_dialogue", out var d) && d is true;
         if (inDialogue)
         {
@@ -559,8 +581,24 @@ public static partial class McpMod
                 bool chosen = opt["was_chosen"] is true;
 
                 string tag = locked ? " (LOCKED)" : chosen ? " (CHOSEN)" : proceed ? " (PROCEED)" : "";
+                string lethal = opt.TryGetValue("will_kill_player", out var wk) && wk is true ? " **(LETHAL)**" : "";
                 string relic = opt.TryGetValue("relic_name", out var rn) && rn != null ? $" [Relic: {rn}]" : "";
-                sb.AppendLine($"- [{opt["index"]}] **{opt["title"]}**{tag}{relic} - {opt["description"]}");
+                sb.AppendLine($"- [{opt["index"]}] **{opt["title"]}**{tag}{lethal}{relic} - {opt["description"]}");
+
+                if (opt.TryGetValue("effects", out var efObj) && efObj is Dictionary<string, object?> effects && effects.Count > 0)
+                    sb.AppendLine($"  - Effects: {string.Join(", ", effects.Select(kv => $"{kv.Key}={kv.Value}"))}");
+
+                // Relic and card payloads used to be reduced to a bare name in markdown.
+                if (opt.TryGetValue("relic_description", out var rd) && rd != null)
+                    sb.AppendLine($"  - Relic **{rn}**: {rd}");
+                if (opt.TryGetValue("cards", out var cObj) && cObj is List<Dictionary<string, object?>> cards)
+                {
+                    foreach (var card in cards)
+                    {
+                        string starCost = card.TryGetValue("star_cost", out var sc) && sc != null ? $" + {sc} star" : "";
+                        sb.AppendLine($"  - Card **{card["name"]}** ({card["cost"]} energy{starCost}) [{card["type"]}] {card["rarity"]} - {card["description"]}");
+                    }
+                }
             }
             sb.AppendLine();
         }

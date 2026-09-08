@@ -1,6 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
+using System.Text.RegularExpressions;
+using MegaCrit.Sts2.Core.Entities.Ancients;
+using MegaCrit.Sts2.Core.Localization;
+using MegaCrit.Sts2.Core.Localization.DynamicVars;
 using MegaCrit.Sts2.Core.Saves;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Context;
@@ -1550,7 +1555,11 @@ public static partial class McpMod
     {
         var state = new Dictionary<string, object?>();
 
-        var eventModel = eventRoom.CanonicalEvent;
+        // LocalMutableEvent is the per-run mutable copy and carries the resolved
+        // Description; CanonicalEvent is the shared template whose Description is
+        // empty, so reading it there left `body` null. Same pattern as
+        // BuildFakeMerchantState below.
+        var eventModel = eventRoom.LocalMutableEvent ?? eventRoom.CanonicalEvent;
         bool isAncient = eventModel is AncientEventModel;
         state["event_id"] = eventModel.Id.Entry;
         state["event_name"] = SafeGetText(() => eventModel.Title);
@@ -1566,12 +1575,23 @@ public static partial class McpMod
             {
                 var hitbox = ancientLayout.GetNodeOrNull<NClickableControl>("%DialogueHitbox");
                 inDialogue = hitbox != null && hitbox.Visible && hitbox.IsEnabled;
+
+                // Without this the agent clicks through ancient dialogue blind:
+                // in_dialogue said "keep clicking" but nothing carried what was said.
+                var dialogue = BuildAncientDialogueState(ancientLayout);
+                if (dialogue != null)
+                    state["dialogue"] = dialogue;
             }
         }
         state["in_dialogue"] = inDialogue;
 
         // Event body text
         state["body"] = SafeGetText(() => eventModel.Description);
+
+        // True once every remaining option is the "leave" one - the agent can stop
+        // looking for a meaningful choice. The proceed option itself is still listed
+        // below with is_proceed set.
+        state["is_finished"] = eventModel.IsFinished;
 
         // Options from UI
         var options = new List<Dictionary<string, object?>>();
@@ -1585,18 +1605,38 @@ public static partial class McpMod
                 var optData = new Dictionary<string, object?>
                 {
                     ["index"] = index,
+                    // Locale-independent identity for the option, e.g.
+                    // "TRASH_HEAP.pages.INITIAL.options.DIVE_IN". title/description are
+                    // localized display text and change with the player's language;
+                    // text_key does not, so match on this rather than parsing prose.
+                    ["text_key"] = string.IsNullOrEmpty(opt.TextKey) ? null : opt.TextKey,
                     ["title"] = SafeGetText(() => opt.Title),
                     ["description"] = SafeGetText(() => opt.Description),
                     ["is_locked"] = opt.IsLocked,
                     ["is_proceed"] = opt.IsProceed,
                     ["was_chosen"] = opt.WasChosen
                 };
+                // The game's own lethality check for this option. Absent when the
+                // option carries no such predicate, false when it is survivable at the
+                // player's current HP - so null and false mean different things.
+                optData["will_kill_player"] = EvaluateWillKillPlayer(opt, runState);
+                // Numbers this option's own text interpolates, e.g. { "hp_loss": 8 }.
+                // Omitted when the option's effect is not expressed as a number.
+                var optEffects = BuildOptionEffects(opt);
+                if (optEffects.Count > 0)
+                    optData["effects"] = optEffects;
                 if (opt.Relic != null)
                 {
                     optData["relic_name"] = SafeGetText(() => opt.Relic.Title);
                     optData["relic_description"] = SafeGetText(() => opt.Relic.DynamicDescription);
                 }
                 optData["keywords"] = BuildHoverTips(opt.HoverTips);
+                // Cards the option's tips point at (a curse it grants, a card it adds).
+                // keywords flattens those to name + description; this keeps the full
+                // card so the agent can judge cost, type and rarity.
+                var optCards = BuildOptionCards(opt.HoverTips);
+                if (optCards.Count > 0)
+                    optData["cards"] = optCards;
                 options.Add(optData);
                 index++;
             }
@@ -1604,6 +1644,150 @@ public static partial class McpMod
         state["options"] = options;
 
         return state;
+    }
+
+    /// <summary>
+    /// Runs the option's own WillKillPlayer predicate against the local player.
+    /// Returns null when the option defines no predicate (most options) so callers can
+    /// tell "not lethal" apart from "the game never claimed either way".
+    /// </summary>
+    private static bool? EvaluateWillKillPlayer(EventOption opt, RunState runState)
+    {
+        try
+        {
+            var predicate = opt.WillKillPlayer;
+            if (predicate == null) return null;
+            var me = LocalContext.GetMe(runState);
+            return me != null ? predicate(me) : null;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// The ancient's dialogue as it stands on screen. Only lines already revealed are
+    /// returned - the layout holds the whole script, and reporting unrevealed lines
+    /// would show the agent text the player cannot see yet.
+    /// </summary>
+    private static Dictionary<string, object?>? BuildAncientDialogueState(NAncientEventLayout layout)
+    {
+        try
+        {
+            if (GetInstanceFieldValue(layout, "_dialogue") is not IReadOnlyList<AncientDialogueLine> lines
+                || lines.Count == 0)
+                return null;
+
+            var currentLine = GetInstanceFieldValue(layout, "_currentDialogueLine") as int? ?? 0;
+            var revealed = Math.Clamp(currentLine + 1, 0, lines.Count);
+
+            var shown = new List<Dictionary<string, object?>>();
+            for (var i = 0; i < revealed; i++)
+            {
+                shown.Add(new Dictionary<string, object?>
+                {
+                    ["index"] = i,
+                    ["speaker"] = lines[i].Speaker.ToString(),
+                    ["text"] = SafeGetText(() => lines[i].LineText)
+                });
+            }
+
+            return new Dictionary<string, object?>
+            {
+                ["current_line"] = currentLine,
+                ["total_lines"] = lines.Count,
+                ["lines"] = shown
+            };
+        }
+        catch { return null; }
+    }
+
+    // Matches a localization placeholder such as "{HpLoss}" or "{Gold:N0}".
+    private static readonly Regex LocPlaceholderPattern =
+        new(@"\{(\w+)(?::[^}]*)?\}", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Splits the event's shared variable pool down to the numbers a single option
+    /// actually talks about.
+    ///
+    /// Every option's LocString carries the whole event's variable set - the "lose HP"
+    /// option is handed the event's Gold var too - so the set alone cannot say what an
+    /// option does. The option's own raw (pre-substitution) text can: it names the
+    /// placeholders it interpolates. Keying off those, and off numeric DynamicVars only,
+    /// leaves just this option's numbers.
+    ///
+    /// Effects with no number in the text (removing a card, gaining a random relic) have
+    /// no placeholder and so appear nowhere here. This is a hint, not a complete
+    /// description of the option - text_key and description remain authoritative.
+    /// </summary>
+    private static Dictionary<string, object?> BuildOptionEffects(EventOption opt)
+    {
+        var effects = new Dictionary<string, object?>();
+        CollectLocStringEffects(opt.Title, effects);
+        CollectLocStringEffects(opt.Description, effects);
+        return effects;
+    }
+
+    private static void CollectLocStringEffects(LocString? loc, Dictionary<string, object?> effects)
+    {
+        if (loc == null) return;
+        try
+        {
+            var vars = loc.Variables;
+            if (vars == null || vars.Count == 0) return;
+            var raw = loc.GetRawText();
+            if (string.IsNullOrEmpty(raw)) return;
+            foreach (Match match in LocPlaceholderPattern.Matches(raw))
+            {
+                var name = match.Groups[1].Value;
+                // String vars (character, pronounSubject, ...) are prose, not effects.
+                if (!vars.TryGetValue(name, out var value) || value is not DynamicVar dynamicVar)
+                    continue;
+                try { effects[ToSnakeCase(name)] = dynamicVar.IntValue; }
+                catch { }
+            }
+        }
+        catch { }
+    }
+
+    // Dictionary keys bypass _jsonOptions' PropertyNamingPolicy, so var names arrive
+    // PascalCase and have to be converted here to match the rest of the JSON.
+    private static string ToSnakeCase(string name)
+    {
+        var sb = new StringBuilder(name.Length + 4);
+        for (int i = 0; i < name.Length; i++)
+        {
+            var c = name[i];
+            if (char.IsUpper(c))
+            {
+                if (i > 0 && (!char.IsUpper(name[i - 1]) || (i + 1 < name.Length && !char.IsUpper(name[i + 1]))))
+                    sb.Append('_');
+                sb.Append(char.ToLowerInvariant(c));
+            }
+            else
+            {
+                sb.Append(c);
+            }
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Extracts the full card behind every CardHoverTip on an event option.
+    /// </summary>
+    private static List<Dictionary<string, object?>> BuildOptionCards(IEnumerable<IHoverTip>? tips)
+    {
+        var cards = new List<Dictionary<string, object?>>();
+        if (tips == null) return cards;
+        try
+        {
+            foreach (var tip in tips)
+            {
+                if (tip is not CardHoverTip cardTip || cardTip.Card == null) continue;
+                try { cards.Add(BuildCardInfo(cardTip.Card)); }
+                catch { }
+            }
+        }
+        catch { }
+        return cards;
     }
 
     private static Dictionary<string, object?> BuildFakeMerchantState(EventRoom eventRoom, RunState runState)

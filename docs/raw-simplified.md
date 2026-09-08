@@ -187,6 +187,15 @@ picked and how many the prompt wants; each entry in `cards` carries `is_selected
 | `choose_event_option` | `index`: int | Choose an event option by index from state. Locked options return an error. Also used for "Proceed" options. |
 | `advance_dialogue` | _(none)_ | Click through Ancient dialogue until `in_dialogue` is false. |
 
+Ancient dialogue text is in `event.dialogue.lines` (only the lines revealed so far).
+
+Each option carries `text_key` (locale-independent id - match on this instead of
+the localized `title`/`description`) and `will_kill_player` (the game's own lethality
+check; `null` means the option defines no check, not that it is safe). Options that
+grant a card expose it in full under `cards`. `effects` gives the numbers the
+option's text names, e.g. `{"hp_loss": 8}` - only those, so an option whose effect
+has no number in its text has no `effects`.
+
 ### Rest Site (`rest_site`)
 
 | Action | Parameters | When to Use |
