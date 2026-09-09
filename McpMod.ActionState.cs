@@ -5,6 +5,7 @@ using System.Threading;
 using Godot;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Context;
+using MegaCrit.Sts2.Core.Nodes;
 using MegaCrit.Sts2.Core.Nodes.Combat;
 using MegaCrit.Sts2.Core.Nodes.Screens;
 using MegaCrit.Sts2.Core.Nodes.Screens.CardSelection;
@@ -30,6 +31,10 @@ public static partial class McpMod
     // Number of consecutive settled polls required, to avoid catching a gap between
     // two queued actions.
     private const int StateWaitStableChecks = 2;
+    // Consecutive settle checks that failed to evaluate (main-thread exception) before we
+    // give up and read the state as-is. A blip while a room tears down must not read as
+    // "settled", but a persistently broken check must not burn the whole budget either.
+    private const int StateWaitMaxUnknownChecks = 40;
 
     // Called on the HTTP thread. Adds "state" to an action result, waiting for the game
     // to settle first when the action was actually accepted. Rejected actions changed
@@ -63,18 +68,17 @@ public static partial class McpMod
                 break;
             }
 
-            // A room transition (map node, event exit, combat rewards) can be mid-flight
-            // even with an idle action queue, and reads as "unknown". Give it the rest of
-            // the budget to land on a real screen.
-            bool transitioning = settled
-                && state != null
-                && state.TryGetValue("state_type", out var type)
-                && (type as string) == "unknown"
-                && elapsed.ElapsedMilliseconds < StateWaitTimeoutMs;
+            // A room transition can still be mid-flight even with an idle action queue and
+            // an idle transition overlay (the next screen's own setup runs over a few more
+            // frames), and it reads as a transient state. Give it the rest of the budget to
+            // land on a real screen.
+            bool transitioning = settled && state != null && IsTransientState(state);
 
-            if (!transitioning)
+            if (!transitioning || elapsed.ElapsedMilliseconds >= StateWaitTimeoutMs)
             {
                 result["state"] = state;
+                if (transitioning)
+                    result["state_wait_timed_out"] = true;
                 break;
             }
 
@@ -92,6 +96,7 @@ public static partial class McpMod
     private static bool WaitForSettledGame(Stopwatch elapsed)
     {
         int stable = 0;
+        int unknown = 0;
 
         while (true)
         {
@@ -109,10 +114,18 @@ public static partial class McpMod
             }
             catch (Exception ex)
             {
-                // Can't evaluate the game — don't hang the caller on it.
+                // Can't evaluate the game. Mid-transition this is exactly when the state is
+                // least trustworthy, so keep waiting - but only for a bounded run of them,
+                // so a permanently broken check doesn't cost every caller the full budget.
                 GD.PrintErr($"[STS2 MCP] Settle check failed: {ex}");
-                return true;
+                if (++unknown >= StateWaitMaxUnknownChecks)
+                    return true;
+                stable = 0;
+                Thread.Sleep(StateWaitPollMs);
+                continue;
             }
+
+            unknown = 0;
 
             if (ready && elapsed.ElapsedMilliseconds >= StateWaitMinMs)
             {
@@ -134,58 +147,76 @@ public static partial class McpMod
     private static Dictionary<string, object?> BuildStateForCurrentRun()
         => IsMultiplayerRun() ? BuildMultiplayerGameState() : BuildGameState();
 
+    // True when the built state is one the game only passes through, so it is worth
+    // rebuilding rather than handing back. The state builders reach these when the action
+    // queue and the fade have both gone idle but the next screen has not opened yet.
+    private static bool IsTransientState(Dictionary<string, object?> state)
+    {
+        if (!state.TryGetValue("state_type", out var raw) || raw is not string type)
+            return false;
+
+        // No room yet, or one the builders don't recognise: a room swap in flight.
+        if (type == "unknown")
+            return true;
+
+        // Combat is over but neither the rewards screen nor the map has opened: both state
+        // builders report the combat room's type with no "battle" payload and a "Combat
+        // ended. Waiting for rewards..." message, which is nothing the agent can act on.
+        return (type is "monster" or "elite" or "boss") && !state.ContainsKey("battle");
+    }
+
     // Main thread only. True when nothing is left to resolve and reading the state now
     // gives the agent something it can act on.
     private static bool IsGameSettled()
     {
-        try
-        {
-            // A blocking popup halts everything until it is dismissed via menu_select,
-            // so this is as settled as the game will get.
-            var tree = Engine.GetMainLoop() as SceneTree;
-            if (tree?.Root != null && IsAnyFtueVisible(tree.Root))
-                return true;
-
-            var run = RunManager.Instance;
-            if (run is not { IsInProgress: true })
-                return true;
-
-            // Same reasoning as the popup check above: a selection screen is waiting on
-            // the agent, so this is as settled as the game will get. Waiting on the queue
-            // here is actively wrong - the action that opened the screen is parked in it
-            // (CardSelectCmd signals the player choice, which leaves the action at the head
-            // of its queue until the pick is confirmed, so IsEmpty never turns true), and in
-            // combat the card effect that raised it also holds the effect depth above zero.
-            if (IsAwaitingPlayerChoice())
-                return true;
-
-            if (!run.ActionQueueSet.IsEmpty)
-                return false;
-
-            var combat = CombatManager.Instance;
-            if (combat is not { IsInProgress: true })
-                return true;
-            // Combat is wrapping up (win, loss, or player death): wait for the run to
-            // land on whatever screen comes next rather than reporting a dying combat.
-            if (combat.IsOverOrEnding || combat.IsStarting)
-                return false;
-            if (combat.PlayerActionsDisabled)
-                return false;
-
-            var runState = run.DebugOnlyGetState();
-            var player = runState != null ? LocalContext.GetMe(runState) : null;
-            // No local player, or a dead one: nothing more for the agent to wait on.
-            if (player?.Creature is not { IsAlive: true })
-                return true;
-            if (combat.IsExecutingCardOrPotionEffect(player))
-                return false;
-
-            return IsPlayPhase(player);
-        }
-        catch
-        {
+        // A blocking popup halts everything until it is dismissed via menu_select,
+        // so this is as settled as the game will get.
+        var tree = Engine.GetMainLoop() as SceneTree;
+        if (tree?.Root != null && IsAnyFtueVisible(tree.Root))
             return true;
-        }
+
+        // Room and act changes (RunManager.EnterRoom / ExitCurrentRoom / EnterAct) are plain
+        // async Tasks driven by NTransition's fade, so they never touch the action queue -
+        // without this check the queue reads as empty for the whole transition and we report
+        // the room the player just left.
+        if (NGame.Instance?.Transition is { InTransition: true })
+            return false;
+
+        var run = RunManager.Instance;
+        if (run is not { IsInProgress: true })
+            return true;
+
+        // Same reasoning as the popup check above: a selection screen is waiting on
+        // the agent, so this is as settled as the game will get. Waiting on the queue
+        // here is actively wrong - the action that opened the screen is parked in it
+        // (CardSelectCmd signals the player choice, which leaves the action at the head
+        // of its queue until the pick is confirmed, so IsEmpty never turns true), and in
+        // combat the card effect that raised it also holds the effect depth above zero.
+        if (IsAwaitingPlayerChoice())
+            return true;
+
+        if (!run.ActionQueueSet.IsEmpty)
+            return false;
+
+        var combat = CombatManager.Instance;
+        if (combat is not { IsInProgress: true })
+            return true;
+        // Combat is wrapping up (win, loss, or player death): wait for the run to
+        // land on whatever screen comes next rather than reporting a dying combat.
+        if (combat.IsOverOrEnding || combat.IsStarting)
+            return false;
+        if (combat.PlayerActionsDisabled)
+            return false;
+
+        var runState = run.DebugOnlyGetState();
+        var player = runState != null ? LocalContext.GetMe(runState) : null;
+        // No local player, or a dead one: nothing more for the agent to wait on.
+        if (player?.Creature is not { IsAlive: true })
+            return true;
+        if (combat.IsExecutingCardOrPotionEffect(player))
+            return false;
+
+        return IsPlayPhase(player);
     }
 
     // Main thread only. True when the game is parked on a screen only the agent can
