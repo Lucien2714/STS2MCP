@@ -468,11 +468,7 @@ public static partial class McpMod
         else if (topOverlay is NGameOverScreen gameOverScreen)
         {
             result["state_type"] = "game_over";
-            result["game_over"] = new Dictionary<string, object?>
-            {
-                ["message"] = "Run ended.",
-                ["options"] = new List<string> { "main_menu" }
-            };
+            result["game_over"] = BuildGameOverState(gameOverScreen, runState);
         }
         else if (topOverlay is IOverlayScreen
                  && topOverlay is not NRewardsScreen
@@ -634,6 +630,58 @@ public static partial class McpMod
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Game-over summary. NGameOverScreen resolves the run's RunHistory in
+    /// _Ready (falling back to a synthesized one carrying the victory-room
+    /// flag when RunManager has none), so read the screen's own copy and mirror
+    /// its fallbacks. Outcome mirrors the game's GameOverType mapping: a win
+    /// wins over everything else, then abandon, then the death that ended it.
+    /// </summary>
+    private static Dictionary<string, object?> BuildGameOverState(NGameOverScreen gameOverScreen, RunState runState)
+    {
+        var history = GetInstanceFieldValue(gameOverScreen, "_history") as RunHistory
+                      ?? RunManager.Instance?.History;
+        var victory = history?.Win ?? (runState.CurrentRoom?.IsVictoryRoom ?? false);
+
+        string outcome;
+        string? killedBy = null;
+        if (victory)
+        {
+            outcome = "victory";
+        }
+        else if (history == null)
+        {
+            outcome = "unknown";
+        }
+        else if (history.WasAbandoned)
+        {
+            outcome = "abandoned";
+        }
+        else if (history.KilledByEncounter != ModelId.none)
+        {
+            outcome = "combat_death";
+            killedBy = history.KilledByEncounter.Entry;
+        }
+        else if (history.KilledByEvent != ModelId.none)
+        {
+            outcome = "event_death";
+            killedBy = history.KilledByEvent.Entry;
+        }
+        else
+        {
+            outcome = "unknown";
+        }
+
+        return new Dictionary<string, object?>
+        {
+            ["message"] = victory ? "Run ended in victory." : "Run ended.",
+            ["victory"] = victory,
+            ["outcome"] = outcome,
+            ["killed_by"] = killedBy,
+            ["options"] = new List<string> { "main_menu" }
+        };
     }
 
     private static void AddCharacterSelectMenuState(

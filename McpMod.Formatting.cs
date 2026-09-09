@@ -370,6 +370,12 @@ public static partial class McpMod
         {
             if (gameOver.TryGetValue("message", out var msg) && msg != null)
                 sb.AppendLine(msg.ToString());
+            if (gameOver.TryGetValue("outcome", out var outcome) && outcome != null)
+            {
+                var killedBy = gameOver.GetValueOrDefault("killed_by")?.ToString();
+                sb.AppendLine($"Outcome: `{outcome}`"
+                              + (string.IsNullOrEmpty(killedBy) ? "" : $" (killed by {killedBy})"));
+            }
             if (gameOver.TryGetValue("options", out var optionsObj) && optionsObj != null)
                 FormatMenuOptionsMarkdown(sb, optionsObj);
         }

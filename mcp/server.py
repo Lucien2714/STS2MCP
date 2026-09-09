@@ -220,6 +220,11 @@ async def menu_select(option: str, seed: str | None = None) -> str:
     Modifiers can be mutually exclusive, so the response returns the resulting
     list of ticked modifier keys rather than only the one toggled.
 
+    Game over ("game_over"): only "main_menu" is actionable ("continue" returns
+    an error). The state's `game_over` block reports how the run ended —
+    `victory` (bool), `outcome` ("victory", "combat_death", "event_death",
+    "abandoned" or "unknown") and, for the death outcomes, `killed_by`.
+
     Ascension ("character_select" and "custom_run"): "ascension_up" /
     "ascension_down" move the level by one and are advertised only while that
     direction is available; the state's `ascension` block carries level and max.

@@ -1023,12 +1023,20 @@ Run has ended.
   "state_type": "game_over",
   "game_over": {
     "message": "Run ended.",
+    "victory": false,
+    "outcome": "combat_death",
+    "killed_by": "SPIRE_GROWTH",
     "options": ["main_menu"]
   },
   "run": { ... },
   "player": { ... }
 }
 ```
+
+`victory` is `true` when the run was won. `outcome` is one of `victory`,
+`combat_death`, `event_death`, `abandoned`, or `unknown`. `killed_by` carries the
+encounter or event name for the two death outcomes and is omitted otherwise.
+`message` reads `"Run ended in victory."` on a win, `"Run ended."` otherwise.
 
 Use `menu_select` with `main_menu` to return to the main menu. `continue` is not advertised because it is not an actionable game-over option.
 

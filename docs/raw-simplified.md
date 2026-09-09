@@ -62,7 +62,7 @@ Null fields are omitted from JSON, so `enchantment`, `affliction`, and `star_cos
 | `bundle_select` | Card bundle choice overlay | `select_bundle`, `confirm_bundle_selection`, `cancel_bundle_selection` |
 | `relic_select` | Relic choice overlay (boss relics) | `select_relic`, `skip_relic_selection` |
 | `crystal_sphere` | Crystal Sphere minigame | `crystal_sphere_set_tool`, `crystal_sphere_click_cell`, `crystal_sphere_proceed` |
-| `game_over` | Run ended | `menu_select` with `main_menu` |
+| `game_over` | Run ended (`victory` bool, `outcome`: `victory` / `combat_death` / `event_death` / `abandoned` / `unknown`, optional `killed_by`) | `menu_select` with `main_menu` |
 | `overlay` | Unhandled overlay (catch-all, prevents soft-lock) | None (manual interaction needed) |
 
 **Note:** `use_potion` and `discard_potion` work during any state where potions are accessible (combat, map, events, etc.).
