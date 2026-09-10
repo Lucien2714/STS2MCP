@@ -410,10 +410,10 @@ public static partial class McpMod
             return Error($"Shop item index {index} out of range ({allEntries.Count} items)");
 
         var entry = allEntries[index];
-        if (!entry.IsStocked)
-            return Error("Item is sold out");
-        if (!entry.EnoughGold)
-            return Error($"Not enough gold (need {entry.Cost}, have {player.Gold})");
+        // Same gate the state's can_purchase reports, so a refused purchase explains
+        // itself instead of silently no-opping inside the game's purchase path.
+        if (GetPurchaseBlockedReason(entry, player) is { } blockedReason)
+            return Error(DescribePurchaseBlock(blockedReason, entry, player));
 
         // Fire-and-forget purchase (same path as AutoSlay)
         _ = entry.OnTryPurchaseWrapper(inventory);

@@ -207,8 +207,13 @@ has no number in its text has no `effects`.
 
 | Action | Parameters | When to Use |
 |---|---|---|
-| `shop_purchase` | `index`: int | Buy an item by its index. Must be stocked and affordable. |
+| `shop_purchase` | `index`: int | Buy an item by its index. Only works when the item's `can_purchase` is true. |
 | `proceed` | _(none)_ | Leave the shop. Closes the shopkeeper's inventory first if it's open. |
+
+Each item carries `can_purchase` — the full "will this purchase go through" answer, not just
+`is_stocked && can_afford`. When false, `purchase_blocked_reason` is one of `sold_out`,
+`not_enough_gold`, `potion_slots_full` (belt is full), `potions_forbidden` (a relic blocks
+potions), `cannot_add_to_deck`, or `no_removable_cards` (nothing removable in the deck).
 
 `can_proceed` means "will `proceed` work now", not "is the proceed button enabled". Reading shop state auto-opens the inventory, which the game disables the proceed button behind; `proceed` closes it first, so this stays `true`. `inventory_open` carries the raw overlay state. Same for `fake_merchant`.
 

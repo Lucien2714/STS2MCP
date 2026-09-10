@@ -660,6 +660,10 @@ public static partial class McpMod
                 bool afford = item["can_afford"] is true;
                 string priceTag = stocked ? $"{item["price"]}g" : "SOLD";
                 string affordTag = stocked && !afford ? " (can't afford)" : "";
+                string blockedTag = stocked && afford
+                                    && item.TryGetValue("purchase_blocked_reason", out var blocked) && blocked != null
+                    ? $" (can't buy: {blocked})"
+                    : "";
                 string saleTag = item.TryGetValue("on_sale", out var os) && os is true ? " **SALE**" : "";
 
                 string cardCost = item.TryGetValue("card_cost", out var cc) && cc != null ? cc.ToString()! : "";
@@ -673,7 +677,7 @@ public static partial class McpMod
                     "card_removal" => "**Remove a card** from your deck",
                     _ => "Unknown item"
                 };
-                sb.AppendLine($"- [{item["index"]}] {desc} - {priceTag}{saleTag}{affordTag}");
+                sb.AppendLine($"- [{item["index"]}] {desc} - {priceTag}{saleTag}{affordTag}{blockedTag}");
             }
             sb.AppendLine();
         }

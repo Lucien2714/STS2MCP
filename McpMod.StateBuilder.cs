@@ -12,6 +12,7 @@ using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.HoverTips;
+using MegaCrit.Sts2.Core.Hooks;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Entities.Potions;
 using MegaCrit.Sts2.Core.Models;
@@ -1914,6 +1915,7 @@ public static partial class McpMod
 
         var items = new List<Dictionary<string, object?>>();
         int index = 0;
+        var player = inventory.Player;
 
         // FakeMerchant only sells relics (no cards, potions, or card removal)
         foreach (var entry in inventory.RelicEntries)
@@ -1926,6 +1928,7 @@ public static partial class McpMod
                 ["is_stocked"] = entry.IsStocked,
                 ["can_afford"] = entry.EnoughGold
             };
+            AddPurchasability(item, entry, player);
             if (entry.Model is { } relic)
             {
                 item["relic_id"] = relic.Id.Entry;
@@ -1985,6 +1988,7 @@ public static partial class McpMod
 
         var items = new List<Dictionary<string, object?>>();
         int index = 0;
+        var player = inventory.Player;
 
         // Cards
         foreach (var entry in inventory.CardEntries)
@@ -1998,6 +2002,7 @@ public static partial class McpMod
                 ["can_afford"] = entry.EnoughGold,
                 ["on_sale"] = entry.IsOnSale
             };
+            AddPurchasability(item, entry, player);
             if (entry.CreationResult?.Card is { } card)
             {
                 var cardInfo = BuildCardInfo(card);
@@ -2025,6 +2030,7 @@ public static partial class McpMod
                 ["is_stocked"] = entry.IsStocked,
                 ["can_afford"] = entry.EnoughGold
             };
+            AddPurchasability(item, entry, player);
             if (entry.Model is { } relic)
             {
                 item["relic_id"] = relic.Id.Entry;
@@ -2047,6 +2053,7 @@ public static partial class McpMod
                 ["is_stocked"] = entry.IsStocked,
                 ["can_afford"] = entry.EnoughGold
             };
+            AddPurchasability(item, entry, player);
             if (entry.Model is { } potion)
             {
                 item["potion_id"] = potion.Id.Entry;
@@ -2061,14 +2068,16 @@ public static partial class McpMod
         // Card removal
         if (inventory.CardRemovalEntry is { } removal)
         {
-            items.Add(new Dictionary<string, object?>
+            var removalItem = new Dictionary<string, object?>
             {
                 ["index"] = index,
                 ["category"] = "card_removal",
                 ["price"] = removal.Cost,
                 ["is_stocked"] = removal.IsStocked,
                 ["can_afford"] = removal.EnoughGold
-            });
+            };
+            AddPurchasability(removalItem, removal, player);
+            items.Add(removalItem);
         }
 
         state["items"] = items;
@@ -2079,6 +2088,78 @@ public static partial class McpMod
 
         return state;
     }
+
+    /// <summary>
+    /// Stamps <c>can_purchase</c> (and <c>purchase_blocked_reason</c> when blocked) onto a
+    /// shop item dict. <c>is_stocked</c>/<c>can_afford</c> only cover the two checks
+    /// <see cref="MerchantEntry.OnTryPurchaseWrapper"/> makes up front; the per-category
+    /// purchase can still be refused further down (full potion belt, Sozu, nothing
+    /// removable in the deck). The game just shakes the slot on those, so surface the
+    /// reason instead of letting the agent burn a turn on a no-op purchase.
+    /// </summary>
+    private static void AddPurchasability(Dictionary<string, object?> item, MerchantEntry entry, Player player)
+    {
+        var reason = GetPurchaseBlockedReason(entry, player);
+        item["can_purchase"] = reason == null;
+        item["purchase_blocked_reason"] = reason;
+    }
+
+    /// <summary>
+    /// Why buying <paramref name="entry"/> right now would fail, or <c>null</c> if it
+    /// would go through. Mirrors the checks the purchase path itself makes:
+    /// <see cref="MerchantEntry.OnTryPurchaseWrapper"/> (stock, gold) plus each entry's
+    /// own <c>OnTryPurchase</c> — <c>PotionCmd.TryToProcure</c> for potions,
+    /// <c>CardPileCmd.Add</c>'s <c>ShouldAddToDeck</c> hook for cards, and the
+    /// removal selector's <c>IsRemovable</c> filter for card removal. Relics have no
+    /// extra gate. All of these are read-only queries.
+    /// </summary>
+    private static string? GetPurchaseBlockedReason(MerchantEntry entry, Player player)
+    {
+        if (!entry.IsStocked)
+            return "sold_out";
+        if (!entry.EnoughGold)
+            return "not_enough_gold";
+
+        switch (entry)
+        {
+            case MerchantPotionEntry potionEntry:
+                if (potionEntry.Model is { } potion
+                    && !Hook.ShouldProcurePotion(player.RunState, player.Creature.CombatState, potion, player))
+                    return "potions_forbidden";
+                if (!player.HasOpenPotionSlots)
+                    return "potion_slots_full";
+                return null;
+
+            case MerchantCardEntry cardEntry:
+                if (cardEntry.CreationResult?.Card is { } card
+                    && !Hook.ShouldAddToDeck(player.RunState, card, out _))
+                    return "cannot_add_to_deck";
+                return null;
+
+            case MerchantCardRemovalEntry:
+                if (!player.Deck.Cards.Any(c => c.IsRemovable))
+                    return "no_removable_cards";
+                return null;
+
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>
+    /// Human-readable form of a <see cref="GetPurchaseBlockedReason"/> code, for the
+    /// error a refused <c>shop_purchase</c> returns.
+    /// </summary>
+    private static string DescribePurchaseBlock(string reason, MerchantEntry entry, Player player) => reason switch
+    {
+        "sold_out" => "Item is sold out",
+        "not_enough_gold" => $"Not enough gold (need {entry.Cost}, have {player.Gold})",
+        "potions_forbidden" => "A relic prevents you from obtaining potions",
+        "potion_slots_full" => "All potion slots are full - use or discard a potion first",
+        "cannot_add_to_deck" => "Something prevents that card from being added to your deck",
+        "no_removable_cards" => "No removable cards in your deck",
+        _ => $"Purchase is not allowed right now ({reason})"
+    };
 
     /// <summary>
     /// Answers "can the agent call <c>proceed</c> right now?" rather than reporting the

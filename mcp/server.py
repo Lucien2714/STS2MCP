@@ -603,6 +603,13 @@ async def shop_purchase(item_index: int) -> str:
     Works for both regular shops (state_type: shop) and the fake merchant
     event (state_type: fake_merchant). The fake merchant only sells relics.
 
+    Only buy items whose can_purchase is true. is_stocked and can_afford alone
+    are not enough: a full potion belt, a relic that blocks potions, or a deck
+    with nothing removable also block a purchase. When can_purchase is false,
+    purchase_blocked_reason says which (sold_out, not_enough_gold,
+    potion_slots_full, potions_forbidden, cannot_add_to_deck,
+    no_removable_cards), and this action returns that reason as an error.
+
     Args:
         item_index: 0-based index of the item from the shop state.
     """
@@ -999,7 +1006,8 @@ async def mp_rest_choose_option(option_index: int) -> str:
 async def mp_shop_purchase(item_index: int) -> str:
     """[Multiplayer Shop] Purchase an item from the shop.
 
-    Per-player inventory — no voting needed.
+    Per-player inventory — no voting needed. Only buy items whose can_purchase
+    is true; purchase_blocked_reason explains a false.
 
     Args:
         item_index: 0-based index of the item.
