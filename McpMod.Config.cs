@@ -102,34 +102,53 @@ public static partial class McpMod
         }
     }
 
+    private static bool _instantModeWaitingLogged;
+    private static bool _instantModeErrorLogged;
+
     /// <summary>
-    /// If instant_mode is enabled in the config, force the game's FastMode
-    /// preference to Instant. No-op when disabled. Runs on the main thread because
-    /// it touches game save state; best-effort and never fatal.
+    /// Keeps the game's FastMode preference at Instant while instant_mode is
+    /// enabled. Called from the ProcessFrame main-thread callback because the mod
+    /// initializes before PrefsSave exists and the game later downgrades Instant
+    /// to Fast during startup. Also handles PrefsSave replacement on profile changes.
     /// </summary>
     private static void ApplyInstantModeFromConfig()
     {
-        if (!_config.InstantMode) return;
-
-        RunOnMainThread(() =>
+        if (!_config.InstantMode)
         {
-            try
-            {
-                var prefs = SaveManager.Instance?.PrefsSave;
-                if (prefs == null)
-                {
-                    GD.PrintErr("[STS2 MCP] instant_mode: PrefsSave unavailable; skipped");
-                    return;
-                }
+            _instantModeWaitingLogged = false;
+            _instantModeErrorLogged = false;
+            return;
+        }
 
-                prefs.FastMode = FastModeType.Instant;
-                GD.Print("[STS2 MCP] instant_mode enabled via config: FastMode set to Instant");
+        try
+        {
+            var prefs = SaveManager.Instance?.PrefsSave;
+            if (prefs == null)
+            {
+                if (!_instantModeWaitingLogged)
+                {
+                    GD.Print("[STS2 MCP] instant_mode: waiting for PrefsSave");
+                    _instantModeWaitingLogged = true;
+                }
+                return;
             }
-            catch (Exception ex)
+
+            _instantModeWaitingLogged = false;
+            _instantModeErrorLogged = false;
+
+            if (prefs.FastMode == FastModeType.Instant) return;
+
+            prefs.FastMode = FastModeType.Instant;
+            GD.Print("[STS2 MCP] instant_mode enabled via config: FastMode set to Instant");
+        }
+        catch (Exception ex)
+        {
+            if (!_instantModeErrorLogged)
             {
                 GD.PrintErr($"[STS2 MCP] Failed to apply instant_mode: {ex.Message}");
+                _instantModeErrorLogged = true;
             }
-        });
+        }
     }
 
     /// <summary>

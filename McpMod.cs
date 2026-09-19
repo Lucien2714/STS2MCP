@@ -76,8 +76,6 @@ public static partial class McpMod
             };
             _serverThread.Start();
 
-            ApplyInstantModeFromConfig();
-
             GD.Print($"[STS2 MCP] v{Version} server started on http://localhost:{port}/");
         }
         catch (Exception ex)
@@ -108,6 +106,10 @@ public static partial class McpMod
             catch (Exception ex) { GD.PrintErr($"[STS2 MCP] Main thread action error: {ex}"); }
             processed++;
         }
+
+        // Config initialization happens before the game creates PrefsSave, and the
+        // game may later downgrade Instant to Fast. Reconcile it every frame.
+        ApplyInstantModeFromConfig();
     }
 
     internal static Task<T> RunOnMainThread<T>(Func<T> func)
